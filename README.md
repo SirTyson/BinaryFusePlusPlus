@@ -1,3 +1,8 @@
+This is a fork of the [xor_singleheader library](https://github.com/FastFilter/xor_singleheader). The original library only supported 8 bit and 16 bit BinaryFuse filters.
+This fork generalizes the original library with C++ templates to support more bit widths.
+
+Original readme below:
+
 ## Header-only Xor and Binary Fuse Filter library
 [![Ubuntu 22.04 CI (GCC 11)](https://github.com/FastFilter/xor_singleheader/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/FastFilter/xor_singleheader/actions/workflows/ubuntu.yml)
 [![MSYS2-CI](https://github.com/FastFilter/xor_singleheader/actions/workflows/msys2.yml/badge.svg)](https://github.com/FastFilter/xor_singleheader/actions/workflows/msys2.yml)
