@@ -1,13 +1,14 @@
 #ifndef BINARYFUSEFILTER_H
 #define BINARYFUSEFILTER_H
+#include <algorithm>
+#include <iterator>
+#include <limits>
+
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdexcept>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include <memory>
 #include <type_traits>
@@ -17,22 +18,6 @@
   100 // probability of success should always be > 0.5 so 100 iterations is
       // highly unlikely
 #endif
-
-static int binary_fuse_cmpfunc(const void * a, const void * b) {
-   return ( *(const uint64_t*)a - *(const uint64_t*)b );
-}
-
-static size_t binary_fuse_sort_and_remove_dup(uint64_t* keys, size_t length) {
-  qsort(keys, length, sizeof(uint64_t), binary_fuse_cmpfunc);
-  size_t j = 1;
-  for(size_t i = 1; i < length; i++) {
-    if(keys[i] != keys[i-1]) {
-      keys[j] = keys[i];
-      j++;
-    }
-  }
-  return j;
-}
 
 /**
  * We start with a few utilities.
@@ -180,12 +165,6 @@ static inline uint64_t binary_fuse_fingerprint(uint64_t hash) {
   return hash ^ (hash >> 32);
 }
 
-typedef struct binary_hashes_s {
-  uint32_t h0;
-  uint32_t h1;
-  uint32_t h2;
-} binary_hashes_t;
-
 template <typename T,
           class = typename std::enable_if_t<std::is_unsigned<T>::value>>
 class binary_fuse_t {
@@ -198,10 +177,37 @@ private:
   uint32_t _arrayLength;
   std::vector<T> _fingerprints;
 
+  struct binary_hashes_t {
+    uint32_t h0;
+    uint32_t h1;
+    uint32_t h2;
+  };
+
+  binary_hashes_t hash_batch(uint64_t hash) const {
+    uint64_t hi = binary_fuse_mulhi(hash, _segmentCountLength);
+    binary_hashes_t ans;
+    ans.h0 = (uint32_t)hi;
+    ans.h1 = ans.h0 + _segmentLength;
+    ans.h2 = ans.h1 + _segmentLength;
+    ans.h1 ^= (uint32_t)(hash >> 18) & _segmentLengthMask;
+    ans.h2 ^= (uint32_t)(hash)&_segmentLengthMask;
+    return ans;
+  }
+
+  uint32_t binary_fuse_hash(int index, uint64_t hash) const {
+    uint64_t h = binary_fuse_mulhi(hash, _segmentCountLength);
+    h += index * _segmentLength;
+    // keep the lower 36 bits
+    uint64_t hh = hash & ((1UL << 36) - 1);
+    // index 0: right shift by 36; index 1: right shift by 18; index 2: no shift
+    h ^= (size_t)((hh >> (36 - 18 * index)) & _segmentLengthMask);
+    return h;
+  }
+
 public:
   // allocate enough capacity for a set containing up to 'size' elements
   // size should be at least 2.
-  binary_fuse_t(uint32_t size) {
+  explicit binary_fuse_t(uint32_t size) {
     if (size < 2) {
       throw std::runtime_error("size should be at least 2");
     }
@@ -228,27 +234,6 @@ public:
     _fingerprints.resize(_arrayLength);
   }
 
-  binary_hashes_t hash_batch(uint64_t hash) const {
-    uint64_t hi = binary_fuse_mulhi(hash, _segmentCountLength);
-    binary_hashes_t ans;
-    ans.h0 = (uint32_t)hi;
-    ans.h1 = ans.h0 + _segmentLength;
-    ans.h2 = ans.h1 + _segmentLength;
-    ans.h1 ^= (uint32_t)(hash >> 18) & _segmentLengthMask;
-    ans.h2 ^= (uint32_t)(hash)&_segmentLengthMask;
-    return ans;
-  }
-
-  uint32_t binary_fuse_hash(int index, uint64_t hash) const {
-    uint64_t h = binary_fuse_mulhi(hash, _segmentCountLength);
-    h += index * _segmentLength;
-    // keep the lower 36 bits
-    uint64_t hh = hash & ((1UL << 36) - 1);
-    // index 0: right shift by 36; index 1: right shift by 18; index 2: no shift
-    h ^= (size_t)((hh >> (36 - 18 * index)) & _segmentLengthMask);
-    return h;
-  }
-
   // Report if the key is in the set, with false positive rate.
   bool contain(uint64_t key) const {
     uint64_t hash = binary_fuse_mix_split(key, _seed);
@@ -270,8 +255,14 @@ public:
   // too many duplicated keys.
   // While highly improbable, it is possible that the population fails, at which
   // point the seed must be rotated.
-  // TODO: Make keys a vector
-  [[nodiscard]] bool populate(uint64_t *keys, uint32_t size) {
+  // keys will be sorted and duplicates removed if any duplicate keys exist
+  [[nodiscard]] bool populate(std::vector<uint64_t> &keys) {
+    if (keys.size() > std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error("size should be at most 2^32");
+    }
+
+    uint32_t size = keys.size();
+
     uint64_t rng_counter = 0x726b2b9d438b9d4d;
     _seed = binary_fuse_rng_splitmix64(&rng_counter);
 
@@ -405,7 +396,10 @@ public:
         size = stacksize;
         break;
       } else if (duplicates > 0) {
-        size = binary_fuse_sort_and_remove_dup(keys, size);
+        // Sort keys and remove duplicates
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        size = keys.size();
       }
 
       // Reset everything except for the last entry in reverseOrder
@@ -429,12 +423,6 @@ public:
                                    _fingerprints[h012[found + 2]];
     }
     return true;
-  }
-
-  size_t serialization_bytes() const {
-    return sizeof(_seed) + sizeof(_segmentLength) + sizeof(_segmentLengthMask) +
-           sizeof(_segmentCount) + sizeof(_segmentCountLength) +
-           sizeof(_arrayLength) + sizeof(T) * _arrayLength;
   }
 };
 
